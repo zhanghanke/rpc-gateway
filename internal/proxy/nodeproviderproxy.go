@@ -20,6 +20,7 @@ func NewNodeProviderProxy(config NodeProviderConfig) (*httputil.ReverseProxy, er
 		r.URL.Scheme = target.Scheme
 		r.URL.Host = target.Host
 		r.URL.Path = target.Path
+		r.URL.RawQuery = target.RawQuery //bug:不然这种格式会报授权失败?api-key
 	}
 
 	return proxy, nil

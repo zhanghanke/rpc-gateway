@@ -70,25 +70,28 @@ func NewRPCGateway(config RPCGatewayConfig) (*RPCGateway, error) {
 		LogLevel:       logLevel,
 	})
 
+	slogger := slog.New(
+		slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+			Level: logLevel,
+		}))
+
 	hcm, err := proxy.NewHealthCheckManager(
 		proxy.HealthCheckManagerConfig{
 			Targets: config.Targets,
 			Config:  config.HealthChecks,
-			Logger: slog.New(
-				slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-					Level: logLevel,
-				})),
+			Logger:  slogger,
 		})
 	if err != nil {
 		return nil, errors.Wrap(err, "healthcheckmanager failed")
 	}
 
-	proxy, err := proxy.NewProxy(
+	proxyObject, err := proxy.NewProxy(
 		proxy.Config{
 			Proxy:              config.Proxy,
 			Targets:            config.Targets,
 			HealthChecks:       config.HealthChecks,
 			HealthcheckManager: hcm,
+			Logger:             slogger,
 		},
 	)
 	if err != nil {
@@ -104,11 +107,11 @@ func NewRPCGateway(config RPCGatewayConfig) (*RPCGateway, error) {
 	//
 	r.Use(middleware.Recoverer)
 
-	r.Handle("/", proxy)
+	r.Handle("/", proxyObject)
 
 	return &RPCGateway{
 		config: config,
-		proxy:  proxy,
+		proxy:  proxyObject,
 		hcm:    hcm,
 		metrics: metrics.NewServer(
 			metrics.Config{

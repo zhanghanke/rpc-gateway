@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"log/slog"
 	"time"
 )
 
@@ -22,4 +23,5 @@ type Config struct {
 	Targets            []NodeProviderConfig
 	HealthChecks       HealthCheckConfig
 	HealthcheckManager *HealthCheckManager
+	Logger             *slog.Logger
 }

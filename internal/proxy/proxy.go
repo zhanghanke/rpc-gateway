@@ -2,9 +2,12 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
-	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,6 +21,8 @@ type Proxy struct {
 
 	metricRequestDuration *prometheus.HistogramVec
 	metricRequestErrors   *prometheus.CounterVec
+
+	Logger *slog.Logger
 }
 
 func NewProxy(config Config) (*Proxy, error) {
@@ -56,6 +61,7 @@ func NewProxy(config Config) (*Proxy, error) {
 				"provider",
 				"type",
 			}),
+		Logger: config.Logger,
 	}
 
 	for _, target := range config.Targets {
@@ -71,7 +77,7 @@ func NewProxy(config Config) (*Proxy, error) {
 }
 
 func (p *Proxy) HasNodeProviderFailed(statusCode int) bool {
-	return statusCode >= http.StatusInternalServerError || statusCode == http.StatusTooManyRequests
+	return statusCode != http.StatusOK
 }
 
 func (p *Proxy) copyHeaders(dst http.ResponseWriter, src http.ResponseWriter) {
@@ -81,6 +87,31 @@ func (p *Proxy) copyHeaders(dst http.ResponseWriter, src http.ResponseWriter) {
 		}
 
 		dst.Header().Set(k, v[0])
+	}
+}
+
+func (p *Proxy) proxyWithTimeout(target *NodeProvider, req *http.Request) (*ReponseWriter, error) {
+	pw := NewResponseWriter()
+	ctx, cancel := context.WithTimeout(req.Context(), p.timeout)
+	defer cancel()
+
+	done := make(chan struct{})
+
+	go func() {
+		target.Proxy.ServeHTTP(pw, req)
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, context.DeadlineExceeded
+		} else if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, context.Canceled
+		}
+		return nil, ctx.Err()
+	case <-done:
+		return pw, nil
 	}
 }
 
@@ -106,34 +137,59 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	var once sync.Once
+	var wg sync.WaitGroup
+
+	responded := make(chan struct{})
+
 	for _, target := range p.targets {
+
 		if !p.hcm.IsHealthy(target.Name()) {
 			continue
 		}
-		start := time.Now()
 
-		pw := NewResponseWriter()
-		r.Body = io.NopCloser(bytes.NewBuffer(body.Bytes()))
+		wg.Add(1)
+		go func(target *NodeProvider) {
+			defer wg.Done()
 
-		p.timeoutHandler(target).ServeHTTP(pw, r)
+			p.Logger.Debug("proxying request", slog.String("target", target.Name()))
+			req := r.Clone(ctx)
+			req.Body = io.NopCloser(bytes.NewBuffer(body.Bytes()))
 
-		if p.HasNodeProviderFailed(pw.statusCode) {
-			p.metricRequestDuration.WithLabelValues(target.Name(), r.Method, strconv.Itoa(pw.statusCode)).
-				Observe(time.Since(start).Seconds())
-			p.metricRequestErrors.WithLabelValues(target.Name(), "rerouted").Inc()
+			pw, err := p.proxyWithTimeout(target, req)
+			if err != nil {
+				p.Logger.Error("failed to proxy request",
+					slog.String("target", target.Name()), slog.String("error", err.Error()))
+				return
+			}
 
-			continue
-		}
-		p.copyHeaders(w, pw)
+			if p.HasNodeProviderFailed(pw.statusCode) {
+				p.Logger.Error("failed to proxy request",
+					slog.String("target", target.Name()), slog.Int("status_code", pw.statusCode))
+				return
+			}
+			once.Do(func() {
+				p.Logger.Debug("select proxying request", slog.String("target", target.Name()))
+				p.copyHeaders(w, pw)
+				w.WriteHeader(pw.statusCode)
+				w.Write(pw.body.Bytes()) // nolint:errcheck
 
-		w.WriteHeader(pw.statusCode)
-		w.Write(pw.body.Bytes()) // nolint:errcheck
+				// 通知其他协程停止
+				cancel()
+				close(responded)
+			})
 
-		p.metricRequestDuration.WithLabelValues(target.Name(), r.Method, strconv.Itoa(pw.statusCode)).
-			Observe(time.Since(start).Seconds())
-
-		return
+		}(target)
 	}
 
-	p.errServiceUnavailable(w)
+	wg.Wait()
+	select {
+	case <-responded:
+		// 有人已经成功响应了
+	default:
+		p.errServiceUnavailable(w)
+	}
 }

@@ -2,3 +2,6 @@
 /main
 /tags
 /vendor
+/log
+solana_config.yml
+/build

@@ -150,19 +150,19 @@ func (h *HealthChecker) checkAndSetGasLeftHealth() {
 }
 
 func (h *HealthChecker) Start(c context.Context) {
-	h.CheckAndSetHealth()
-
-	ticker := time.NewTicker(h.config.Interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.Done():
-			return
-		case <-ticker.C:
-			h.CheckAndSetHealth()
-		}
-	}
+	//h.CheckAndSetHealth()
+	//
+	//ticker := time.NewTicker(h.config.Interval)
+	//defer ticker.Stop()
+	//
+	//for {
+	//	select {
+	//	case <-c.Done():
+	//		return
+	//	case <-ticker.C:
+	//		h.CheckAndSetHealth()
+	//	}
+	//}
 }
 
 func (h *HealthChecker) Stop(_ context.Context) error {
