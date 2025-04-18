@@ -167,7 +167,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if p.HasNodeProviderFailed(pw.statusCode) {
-				p.Logger.Error("fHasNodeProviderFailed: ailed to proxy request",
+				p.Logger.Error("HasNodeProviderFailed: failed to proxy request",
 					slog.String("target", target.Name()), slog.Int("status_code", pw.statusCode))
 				return
 			}
@@ -187,6 +187,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 	if !respondedOK.Load() {
+		p.Logger.Error("all node providers failed to proxy request")
 		p.errServiceUnavailable(w)
 	}
 }
