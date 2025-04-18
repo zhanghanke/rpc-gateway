@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -143,13 +144,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var once sync.Once
 	var wg sync.WaitGroup
 
-	responded := make(chan struct{})
+	var respondedOK atomic.Bool
 
 	for _, target := range p.targets {
-
-		if !p.hcm.IsHealthy(target.Name()) {
-			continue
-		}
+		//if !p.hcm.IsHealthy(target.Name()) { //检测功能屏蔽了，这里不需要再调用
+		//	continue
+		//}
 
 		wg.Add(1)
 		go func(target *NodeProvider) {
@@ -161,17 +161,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			pw, err := p.proxyWithTimeout(target, req)
 			if err != nil {
-				p.Logger.Error("failed to proxy request",
+				p.Logger.Debug("proxyWithTimeout: failed to proxy request",
 					slog.String("target", target.Name()), slog.String("error", err.Error()))
 				return
 			}
 
 			if p.HasNodeProviderFailed(pw.statusCode) {
-				p.Logger.Error("failed to proxy request",
+				p.Logger.Error("fHasNodeProviderFailed: ailed to proxy request",
 					slog.String("target", target.Name()), slog.Int("status_code", pw.statusCode))
 				return
 			}
 			once.Do(func() {
+				respondedOK.Store(true)
 				p.Logger.Debug("select proxying request", slog.String("target", target.Name()))
 				p.copyHeaders(w, pw)
 				w.WriteHeader(pw.statusCode)
@@ -179,17 +180,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 				// 通知其他协程停止
 				cancel()
-				close(responded)
 			})
 
 		}(target)
 	}
 
 	wg.Wait()
-	select {
-	case <-responded:
-		// 有人已经成功响应了
-	default:
+	if !respondedOK.Load() {
 		p.errServiceUnavailable(w)
 	}
 }
