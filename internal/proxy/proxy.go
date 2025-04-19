@@ -3,12 +3,13 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"log/slog"
 	"net/http"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -92,6 +93,10 @@ func (p *Proxy) copyHeaders(dst http.ResponseWriter, src http.ResponseWriter) {
 }
 
 func (p *Proxy) proxyWithTimeout(target *NodeProvider, req *http.Request) (*ReponseWriter, error) {
+	/*
+		method, _, _ := ParseRPCMethodFromRequest(req)
+		defer TimeCost(fmt.Sprintf("target:%s,proxyWithTimeout-method:%s", target.Name(), method))()
+	*/
 	pw := NewResponseWriter()
 	ctx, cancel := context.WithTimeout(req.Context(), p.timeout)
 	defer cancel()
@@ -130,64 +135,108 @@ func (p *Proxy) errServiceUnavailable(w http.ResponseWriter) {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer TimeCost("Proxy.ServeHTTP")()
 	body := &bytes.Buffer{}
 
 	if _, err := io.Copy(body, r.Body); err != nil {
 		p.errServiceUnavailable(w)
-
 		return
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	var once sync.Once
-	var wg sync.WaitGroup
+	type ReqResult struct {
+		pw   *ReponseWriter
+		err  error
+		node string
+	}
 
-	var respondedOK atomic.Bool
+	respCh := make(chan ReqResult, 1)
+	g, ctx := errgroup.WithContext(ctx)
 
 	for _, target := range p.targets {
-		//if !p.hcm.IsHealthy(target.Name()) { //检测功能屏蔽了，这里不需要再调用
-		//	continue
-		//}
+		copyTarget := target
+		g.Go(func() error {
+			defer TimeCost(fmt.Sprintf("Request By Target:%s", copyTarget.Name()))()
+			defer func() {
+				if err := recover(); err != nil {
+					p.Logger.Error("proxying request panic", err)
+				}
+			}()
 
-		wg.Add(1)
-		go func(target *NodeProvider) {
-			defer wg.Done()
-
-			p.Logger.Debug("proxying request", slog.String("target", target.Name()))
+			p.Logger.Debug("proxying request", slog.String("target", copyTarget.Name()))
 			req := r.Clone(ctx)
 			req.Body = io.NopCloser(bytes.NewBuffer(body.Bytes()))
 
-			pw, err := p.proxyWithTimeout(target, req)
+			pw, err := p.proxyWithTimeout(copyTarget, req)
 			if err != nil {
 				p.Logger.Debug("proxyWithTimeout: failed to proxy request",
-					slog.String("target", target.Name()), slog.String("error", err.Error()))
-				return
+					slog.String("target", copyTarget.Name()), slog.String("error", err.Error()))
+				return nil //忽略
 			}
 
 			if p.HasNodeProviderFailed(pw.statusCode) {
 				p.Logger.Error("HasNodeProviderFailed: failed to proxy request",
-					slog.String("target", target.Name()), slog.Int("status_code", pw.statusCode))
-				return
+					slog.String("target", copyTarget.Name()), slog.Int("status_code", pw.statusCode))
+				return nil //忽略
 			}
-			once.Do(func() {
-				respondedOK.Store(true)
-				p.Logger.Debug("select proxying request", slog.String("target", target.Name()))
-				p.copyHeaders(w, pw)
-				w.WriteHeader(pw.statusCode)
-				w.Write(pw.body.Bytes()) // nolint:errcheck
+			//非阻塞，如果已经有人放入，则放弃
+			select {
+			case respCh <- ReqResult{pw: pw, node: copyTarget.Name()}:
+			default:
+			}
+			return nil
 
-				// 通知其他协程停止
-				cancel()
-			})
-
-		}(target)
+		})
 	}
 
-	wg.Wait()
-	if !respondedOK.Load() {
-		p.Logger.Error("all node providers failed to proxy request")
-		p.errServiceUnavailable(w)
+	go func() {
+		_ = g.Wait()
+		close(respCh)
+	}()
+
+	for res := range respCh {
+		if res.pw != nil {
+			p.Logger.Debug("select proxying request", slog.String("target", res.node))
+			p.copyHeaders(w, res.pw)
+			w.WriteHeader(res.pw.statusCode)
+			_, _ = w.Write(res.pw.body.Bytes())
+			return
+		}
 	}
+
+	p.Logger.Error("all node providers failed to proxy request")
+	p.errServiceUnavailable(w)
+}
+
+func TimeCost(keyName string) func() {
+	begin := time.Now()
+	return func() {
+		cost := time.Since(begin)
+		fmt.Println("Time cost:", keyName, cost)
+	}
+}
+
+// 生产环境不应该使用
+func ParseRPCMethodFromRequest(req *http.Request) (method string, bodyCopy []byte, err error) {
+	if req.Body == nil {
+		return "", nil, fmt.Errorf("empty request body")
+	}
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return "", nil, err
+	}
+
+	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	var rpcPayload struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(bodyBytes, &rpcPayload); err != nil {
+		return "", bodyBytes, err
+	}
+
+	return rpcPayload.Method, bodyBytes, nil
 }

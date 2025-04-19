@@ -12,9 +12,9 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.18.0
-	github.com/sirupsen/logrus v1.9.0
 	github.com/stretchr/testify v1.8.4
 	github.com/urfave/cli/v2 v2.27.1
+	golang.org/x/sync v0.6.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
