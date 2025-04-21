@@ -104,6 +104,11 @@ func (p *Proxy) proxyWithTimeout(target *NodeProvider, req *http.Request) (*Repo
 	done := make(chan struct{})
 
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				p.Logger.Error("ServeHTTP", err)
+			}
+		}()
 		target.Proxy.ServeHTTP(pw, req)
 		close(done)
 	}()
@@ -143,8 +148,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	//ctx, cancel := context.WithCancel(r.Context())
+	//defer cancel()
 
 	type ReqResult struct {
 		pw   *ReponseWriter
@@ -153,7 +158,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respCh := make(chan ReqResult, 1)
-	g, ctx := errgroup.WithContext(ctx)
+	g, _ := errgroup.WithContext(r.Context())
 
 	for _, target := range p.targets {
 		copyTarget := target
@@ -165,8 +170,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 
-			p.Logger.Debug("proxying request", slog.String("target", copyTarget.Name()))
-			req := r.Clone(ctx)
+			//p.Logger.Debug("proxying request", slog.String("target", copyTarget.Name()))
+			req := r.Clone(r.Context()) //这里不要使用ctx，因为会被cancel
 			req.Body = io.NopCloser(bytes.NewBuffer(body.Bytes()))
 
 			pw, err := p.proxyWithTimeout(copyTarget, req)
@@ -214,7 +219,9 @@ func TimeCost(keyName string) func() {
 	begin := time.Now()
 	return func() {
 		cost := time.Since(begin)
-		fmt.Println("Time cost:", keyName, cost)
+		if cost > time.Millisecond*50 {
+			fmt.Println("Time cost:", keyName, cost)
+		}
 	}
 }
 
