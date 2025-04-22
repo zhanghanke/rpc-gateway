@@ -1,3 +1,5 @@
+//支持多节点同时发出请求，选取最快节点返回
+
 > [!CAUTION]
 > The repository has been marked as read-only, and no further updates or maintenance will be provided.
 
